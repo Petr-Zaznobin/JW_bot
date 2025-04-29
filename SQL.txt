@@ -1,0 +1,31 @@
+-- Информация о пользователе и его роли
+CREATE TABLE user_info
+(
+    id      SERIAL PRIMARY KEY,
+    tg_user_id  BIGINT UNIQUE NOT NULL,
+    role    VARCHAR(20) CHECK (role IN ('client', 'admin')) NOT NULL,
+    last_message_ids BIGINT[]
+);
+
+-- Общая информация о пользователе
+CREATE TABLE client_info
+(
+    tg_user_id      BIGINT      PRIMARY KEY,
+    first_name      VARCHAR(100),
+    last_name       VARCHAR(100),
+    tel_num         VARCHAR(13),
+    item_status     INT DEFAULT 0,
+    notif_text      TEXT DEFAULT '',
+    notif_count     INT DEFAULT 0,
+    last_notif_date DATE  DEFAULT CURRENT_DATE,
+ reg_date  DATE DEFAULT CURRENT_DATE,
+ FOREIGN KEY (tg_user_id) REFERENCES user_info (tg_user_id)
+);
+
+-- Массив Telegram ID для администраторов
+CREATE TABLE admin_info
+(
+ tg_user_id   BIGINT UNIQUE NOT NULL,
+ FOREIGN KEY (tg_user_id) REFERENCES user_info (tg_user_id)
+ 
+);
