@@ -58,8 +58,11 @@ async def start_command(message: Message, state: FSMContext):
         await message.answer("👋 Добро пожаловать! Рады вас видеть.")
         is_admin = check_admin(tg_user_id)
         if is_admin:
+            await database.user_registration(tg_user_id, 'admin')
+            await database.admin_registration(tg_user_id)
             await message.answer("Добро пожаловать, в админ-панель.")
         else:
+            await database.user_registration(tg_user_id, 'client')
             await message.answer("Введите, пожалуйста, Ваш номер телефона в формате '7xxxxxxxxxx'")
             await state.set_state(PhoneState.waiting_for_phone)
 
@@ -83,15 +86,15 @@ async def process_phone_number(message: Message, state: FSMContext):
 
 @router.callback_query(lambda c: c.data == "confirm_phone")
 async def callback_confirm_phone(callback: CallbackQuery, state: FSMContext):
+    tg_user_id: int = int(callback.from_user.id)
     data = await state.get_data()
     phone_number = data.get("phone_number")
     if phone_number is None:
         await callback.answer("Номер телефона не найден. Пожалуйста, введите заново.")
         return
 
-    # Добавить код для сохранения номера телефона в базу данных.
-    # Например:
-    # await database.insert_phone_number(callback.from_user.id, phone_number)
+    # Код для сохранения номера телефона в базу данных.
+    await database.client_registration(tg_user_id, phone_number)
 
     await callback.message.answer(f"Ваш номер телефона {phone_number} сохранён в базе данных.")
     await state.clear()
@@ -153,6 +156,19 @@ async def main_menu(tg_user_id: int):
 
 
 #----------------------------
+async def safe_polling(dp):
+    delay = 1
+    while True:
+        try:
+            # здесь используем глобальный bot
+            await dp.start_polling(bot, skip_updates=True)  # <<<
+            break  # если polling отработал без исключения, выходим из цикла
+        except Exception as e:
+            logger.warning(f"Polling error: {e}. Reconnecting in {delay}s...")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)
+
+
 
 @router.callback_query(lambda call: call.data == "main_menu")
 async def MMenu(callback: CallbackQuery):
@@ -174,7 +190,8 @@ async def on_startup():
 async def main():
     try:
         dp.startup.register(on_startup)
-        await dp.start_polling(bot, skip_updates=True)
+        # await dp.start_polling(bot, skip_updates=True)
+        await safe_polling(dp)
     except Exception as e:
         logger.error("Произошла ошибка в main: %s", e)
 

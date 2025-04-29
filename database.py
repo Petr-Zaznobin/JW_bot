@@ -83,19 +83,21 @@ class AsyncDatabase:
 
     # Есть ли пользователь с тг айди в таблице
     async def user_exists(self, tg_user_id: int) -> bool:
-        query = "SELECT EXISTS(SELECT 1 FROM users WHERE tg_user_id = $1)"
+        query = "SELECT EXISTS(SELECT 1 FROM user_info WHERE tg_user_id = $1)"
         try:
             result = await self.fetchval(query, tg_user_id)
             return result
         except Exception as e:
             #nt(f"[DB] Ошибка при проверке существования пользователя: {e}")
             return False
-
+#-------------------------
+#-------messages----------
+#-------------------------
     # Получение последнего сообщения
     async def get_last_messages_by_user_id(self, tg_user_id: int) -> List[int]:
         try:
             query = """
-                    SELECT last_message_ids FROM user_telegram
+                    SELECT last_message_ids FROM user_info
                     WHERE tg_user_id = $1;
                     """
             last_message = await self.fetchval(query, tg_user_id)
@@ -122,7 +124,7 @@ class AsyncDatabase:
 
             exists_query = """
                 SELECT EXISTS(
-                    SELECT 1 FROM user_telegram WHERE tg_user_id = $1
+                    SELECT 1 FROM user_info WHERE tg_user_id = $1
                 );
             """
             exists = await self.fetchval(exists_query, tg_user_id)
@@ -130,7 +132,7 @@ class AsyncDatabase:
             if exists:
                 # Обновляем массив, добавляя новые значения
                 update_query = """
-                    UPDATE user_telegram
+                    UPDATE user_info
                     SET last_message_ids = ARRAY(
                         SELECT unnest(last_message_ids) 
                         UNION 
@@ -143,7 +145,7 @@ class AsyncDatabase:
             else:
                 # Вставляем новые значения в массив
                 insert_query = """
-                    INSERT INTO user_telegram (tg_user_id, last_message_ids)
+                    INSERT INTO user_info (tg_user_id, last_message_ids)
                     VALUES ($1, $2);
                 """
                 await self.execute(insert_query, tg_user_id, last_message)
@@ -157,7 +159,7 @@ class AsyncDatabase:
         try:
             exists_query = """
                 SELECT EXISTS(
-                    SELECT 1 FROM user_telegram WHERE tg_user_id = $1
+                    SELECT 1 FROM user_info WHERE tg_user_id = $1
                 );
             """
             exists = await self.fetchval(exists_query, tg_user_id)
@@ -165,7 +167,7 @@ class AsyncDatabase:
             if exists:
                 # Очищаем массив
                 update_query = """
-                    UPDATE user_telegram
+                    UPDATE user_info
                     SET last_message_ids = ARRAY[]::bigint[]
                     WHERE tg_user_id = $1;
                 """
@@ -178,4 +180,38 @@ class AsyncDatabase:
         except Exception as e:
             logger.error(f"Ошибка при очистке поля last_message_ids для пользователя {tg_user_id}: {e}")
             #print(f"Ошибка при очистке поля last_message_ids для пользователя {tg_user_id}: {e}")
+#-------------------------
+#------------user---------
+#-------------------------
 
+    async def user_registration(self, tg_user_id: int, role: str):
+        try:
+            query = '''
+                INSERT INTO user_info (tg_user_id, role, last_message_ids)
+                VALUES ($1, $2, ARRAY[]::BIGINT[])
+            '''
+            await self.execute(query, tg_user_id, role)
+        except Exception as e:
+            logger.error(f"Ошибка при регистрации пользователя {tg_user_id}: {e}")
+
+
+
+    async def client_registration(self, tg_user_id, phone_number):
+        try:
+            insert_query = """
+                                INSERT INTO client_info (tg_user_id, tel_num)
+                                VALUES ($1, $2);
+                            """
+            await self.execute(insert_query, tg_user_id, phone_number)
+        except Exception as e:
+            logger.error(f"Ошибка при регистрации клиента {tg_user_id}: {e}")
+
+    async def admin_registration(self, tg_user_id):
+        try:
+            insert_query = """
+                                            INSERT INTO admin_info (tg_user_id)
+                                            VALUES ($1);
+                                        """
+            await self.execute(insert_query, tg_user_id)
+        except Exception as e:
+            logger.error(f"Ошибка при регистрации админа {tg_user_id}: {e}")
