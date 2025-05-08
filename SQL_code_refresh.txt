@@ -1,0 +1,64 @@
+--Создание триггера и функции на слушание базы данных:
+
+CREATE OR REPLACE FUNCTION notify_client_update() RETURNS TRIGGER AS $$
+DECLARE
+  payload TEXT;
+BEGIN
+  payload := row_to_json(NEW)::text;
+  PERFORM pg_notify('client_update', payload);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS client_info_after_update ON client_info;
+CREATE TRIGGER client_info_after_update
+  AFTER UPDATE ON client_info
+  FOR EACH ROW
+  WHEN (OLD IS DISTINCT FROM NEW)
+  EXECUTE FUNCTION notify_client_update();
+-----------------------------------------------------------
+
+
+-- Исправил, чтобы номера телефонов были уникальными:
+
+-- 1. Убедимся, что в client_info есть дублирующиеся tel_num:
+SELECT tel_num, COUNT(*) AS cnt
+FROM client_info
+GROUP BY tel_num
+HAVING COUNT(*) > 1;
+
+-- 2. Удалим все дубликаты, оставив по одной записи на каждый номер:
+WITH ranked AS (
+  SELECT
+    tg_user_id,
+    tel_num,
+    reg_date,
+    ROW_NUMBER() OVER (
+      PARTITION BY tel_num
+      ORDER BY reg_date ASC, tg_user_id ASC
+    ) AS rn
+  FROM client_info
+)
+DELETE FROM client_info
+USING ranked
+WHERE client_info.tg_user_id = ranked.tg_user_id
+  AND ranked.rn > 1;
+
+-- 3. Проверим, что дубликатов больше нет:
+SELECT tel_num, COUNT(*) AS cnt
+FROM client_info
+GROUP BY tel_num
+HAVING COUNT(*) > 1;
+
+-- 4. (Опционально) Сразу накладываем уникальное ограничение на tel_num:
+ALTER TABLE client_info
+  ADD CONSTRAINT client_info_tel_num_unique UNIQUE (tel_num);
+-----------------------------------------------------------
+
+
+--Добавление двух полей для путей фото квитанции(receipt_photo_path) 
+--и изделия(product_photo_path) в client_info:
+
+ALTER TABLE client_info
+  ADD COLUMN product_photo_path TEXT DEFAULT '',
+  ADD COLUMN receipt_photo_path TEXT DEFAULT ''; 

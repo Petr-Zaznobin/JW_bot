@@ -215,3 +215,20 @@ class AsyncDatabase:
             await self.execute(insert_query, tg_user_id)
         except Exception as e:
             logger.error(f"Ошибка при регистрации админа {tg_user_id}: {e}")
+
+    async def get_id_from_phone(self, phone):
+        query = '''SELECT tg_user_id FROM client_info WHERE tel_num = $1'''
+        client_tg_id = await self.fetchval(query, phone)
+        return client_tg_id
+
+    async def change_phone(self, tg_user_id: int, phone: str):
+        query = '''
+            UPDATE client_info SET tel_num = $1 WHERE tg_user_id = $2;
+        '''
+        await self.execute(query, phone, tg_user_id)
+
+    async def get_all_admin_ids(self) -> List[int]:
+        query = "SELECT tg_user_id FROM admin_info;"
+        rows = await self.fetch(query)
+        # rows — список Record, у каждого .get('tg_user_id')
+        return [r['tg_user_id'] for r in rows]

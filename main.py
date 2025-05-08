@@ -1,32 +1,32 @@
 import asyncio
 import logging
-import string
 import re
 import ast
+import os
+import json
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
+import asyncpg
 import database
 from config import *
 
 # logging
 logging.basicConfig(
-    # level=logging.INFO,  # Уровень логирования
     level=logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',  # Формат сообщения
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("app.log"),  # Запись логов в файл "app.log"
-        # logging.StreamHandler()  # Вывод логов на консоль
+        logging.FileHandler("app.log"),
     ]
 )
 logger = logging.getLogger(__name__)
 
-# FSM
+# FSM storage
 storage = MemoryStorage()
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -34,7 +34,7 @@ dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
-# postgresql
+# PostgreSQL main pool для обычных запросов
 database = database.AsyncDatabase(
     db_name=db_name,
     user=user,
@@ -43,162 +43,284 @@ database = database.AsyncDatabase(
     port=port
 )
 
+# -------------------------------------------------
+# State definitions
 class PhoneState(StatesGroup):
     waiting_for_phone = State()
 
+class ChangePhoneStates(StatesGroup):
+    waiting_for_old_phone = State()
+    waiting_for_new_phone = State()
+
+# -------------------------------------------------
+# Telegram handlers
 @router.message(Command("start"))
 async def start_command(message: Message, state: FSMContext):
-    tg_user_id: int = int(message.from_user.id)
-    chat_id: int = int(message.chat.id)
+    tg_user_id = message.from_user.id
+    chat_id = message.chat.id
+    is_admin = check_admin(tg_user_id)
 
     user_exist = await database.user_exists(chat_id)
     if user_exist:
-        await main_menu(chat_id)
-    else:
-        await message.answer("👋 Добро пожаловать! Рады вас видеть.")
-        is_admin = check_admin(tg_user_id)
         if is_admin:
-            await database.user_registration(tg_user_id, 'admin')
-            await database.admin_registration(tg_user_id)
-            await message.answer("Добро пожаловать, в админ-панель.")
+            await main_menu_admin(tg_user_id)
         else:
-            await database.user_registration(tg_user_id, 'client')
-            await message.answer("Введите, пожалуйста, Ваш номер телефона в формате '7xxxxxxxxxx'")
-            await state.set_state(PhoneState.waiting_for_phone)
+            await main_menu_client(tg_user_id)
+        return
+
+    await message.answer("👋 Добро пожаловать! Рады вас видеть.")
+
+    if is_admin:
+        await database.user_registration(tg_user_id, 'admin')
+        await database.admin_registration(tg_user_id)
+        await main_menu_admin(tg_user_id)
+        print(tg_user_id)
+    else:
+        await database.user_registration(tg_user_id, 'client')
+        await message.answer("Введите, пожалуйста, Ваш номер телефона в формате '7xxxxxxxxxx'")
+        await state.set_state(PhoneState.waiting_for_phone)
+        print(tg_user_id)
+
+@router.callback_query(lambda c: c.data == "admin_change_phone")
+async def callback_admin_change_phone(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    # Запустим flow для смены номера: первый шаг — ввод старого номера
+    await callback.message.answer(
+        "Введите старый номер телефона, который хотите изменить, в формате '7xxxxxxxxxx' "
+        "(или 'x' для отмены и возврата в меню):"
+    )
+    await state.set_state(ChangePhoneStates.waiting_for_old_phone)
+    # Снимем «часики» у кнопки
+    await callback.answer()
+
+@router.message(ChangePhoneStates.waiting_for_old_phone)
+async def process_old_phone(message: Message, state: FSMContext):
+    text = message.text.strip()
+    # Выход в меню админа по 'x' или 'х'
+    if text.lower() in ('x', 'х', 'X', 'Х'):
+        await state.clear()
+        await main_menu_admin(message.from_user.id)
+        return
+
+    # Валидация старого номера
+    if not re.match(r'^7\d{10}$', text):
+        await message.answer("Неверный формат. Попробуйте ещё раз или введите 'x' для выхода.")
+        return
+
+    old_phone = text
+    await state.update_data(old_phone=old_phone)
+
+    client_tg_id = await database.get_id_from_phone(old_phone)
+    if not client_tg_id:
+        await message.answer("Пользователь с таким номером не найден. Введите другой номер или 'x' для выхода.")
+        return
+
+    await state.update_data(client_tg_id=client_tg_id)
+    await message.answer(f"Пользователь с номером {old_phone} найден!\nТеперь введите новый номер телефона в формате '7xxxxxxxxxx' (или 'x' для выхода):")
+    await state.set_state(ChangePhoneStates.waiting_for_new_phone)
+
+@router.message(ChangePhoneStates.waiting_for_new_phone)
+async def change_new_phone(message: Message, state: FSMContext):
+    text = message.text.strip()
+    # Выход в меню админа
+    if text.lower() in ('x', 'х'):
+        await state.clear()
+        await main_menu_admin(message.from_user.id)
+        return
+
+    # Валидация нового номера
+    if not re.match(r'^7\d{10}$', text):
+        await message.answer("Неверный формат нового номера. Попробуйте ещё раз или введите 'x' для выхода.")
+        return
+
+    new_phone = text
+    data = await state.get_data()
+    client_tg_id = data.get('client_tg_id')
+
+    if client_tg_id:
+        await database.change_phone(client_tg_id, new_phone)
+        await message.answer(f"Номер телефона пользователя успешно изменён на {new_phone}.")
+        client_text = f"Ваш номер успешно изменен на {new_phone}."
+        try:
+            await bot.send_message(client_tg_id, text=client_text)
+        except Exception as e:
+            logger.error(f"Не удалось уведомить пользователя {client_tg_id} об изменении номера: {e}")
+            await bot.send_message(message.from_user.id, text="Не удалось уведомить пользователя об изменении номера(")
+        await state.clear()
+        await main_menu_admin(message.from_user.id)
+    else:
+        await message.answer("Не удалось получить информацию о пользователе. Попробуйте заново или введите 'x' для выхода.")
+
+    await state.clear()
+
 
 @router.message(PhoneState.waiting_for_phone)
 async def process_phone_number(message: Message, state: FSMContext):
-    phone_number: str = message.text.strip()
-    pattern = re.compile(r'^7\d{10}$')
-    if not pattern.match(phone_number):
+    tg_user_id: int = int(message.from_user.id)
+    chat_id: int = int(message.chat.id)
+    phone_number = message.text.strip()
+
+    if not re.match(r'^7\d{10}$', phone_number):
         await message.answer("Неверный формат номера телефона. Пожалуйста, введите номер в формате '7xxxxxxxxxx'")
         return
 
     await state.update_data(phone_number=phone_number)
     await message.answer(f"Ваш номер телефона: {phone_number} получен.")
-    await message.answer(
+    sent = await message.answer(
         text="Все верно?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Все верно!", callback_data="confirm_phone")],
             [InlineKeyboardButton(text="Изменить", callback_data="change_phone")]
         ])
     )
+    await database.set_last_message_by_user_id(tg_user_id, sent.message_id)
 
 @router.callback_query(lambda c: c.data == "confirm_phone")
 async def callback_confirm_phone(callback: CallbackQuery, state: FSMContext):
     tg_user_id: int = int(callback.from_user.id)
+    chat_id: int = int(callback.message.chat.id)
+    await safely_delete_last_message(tg_user_id, chat_id)
     data = await state.get_data()
     phone_number = data.get("phone_number")
-    if phone_number is None:
-        await callback.answer("Номер телефона не найден. Пожалуйста, введите заново.")
-        return
 
-    # Код для сохранения номера телефона в базу данных.
     await database.client_registration(tg_user_id, phone_number)
-
     await callback.message.answer(f"Ваш номер телефона {phone_number} сохранён в базе данных.")
+    # **Уведомляем админов**
+    admin_ids = await database.get_all_admin_ids()
+    notification = f"Новый клиент зарегистрирован с номером: {phone_number} (tg_id: {tg_user_id})"
+    for admin_id in admin_ids:
+        # не забудьте обработать возможные ошибки отправки
+        try:
+            await bot.send_message(chat_id=admin_id, text=notification)
+        except Exception as e:
+            logger.error(f"Не удалось уведомить администратора {admin_id}: {e}")
+
+    # Завершаем FSM и показываем клиенту меню
     await state.clear()
-    await main_menu(int(callback.message.chat.id))
+    await main_menu_client(chat_id)
     await callback.answer()
 
 @router.callback_query(lambda c: c.data == "change_phone")
 async def callback_change_phone(callback: CallbackQuery, state: FSMContext):
+    tg_user_id: int = int(callback.from_user.id)
+    chat_id: int = int(callback.message.chat.id)
     await state.clear()
+    await safely_delete_last_message(tg_user_id, chat_id)
     await callback.message.answer("Введите, пожалуйста, Ваш номер телефона в формате '7xxxxxxxxxx'")
     await state.set_state(PhoneState.waiting_for_phone)
     await callback.answer()
 
-def check_admin(tg_user_id: string)->bool:
-    # Получаем строковое значение переменной из .env (например, "[]" или "[123456789, 987654321]")
-    raw_admin_tg_ids = os.getenv("admin_tg_ids", "[]").strip()
+@router.callback_query(lambda call: call.data == "main_menu")
+async def MMenu(callback: CallbackQuery):
+    await main_menu_client(callback.from_user.id)
+
+# -------------------------------------------------
+# Admin check (unchanged)
+def check_admin(tg_user_id: int) -> bool:
+    raw_ids = os.getenv("admin_tg_ids", "[]").strip()
     try:
-        # Преобразуем строку в список
-        admin_tg_ids = ast.literal_eval(raw_admin_tg_ids)
-    except Exception as e:
-        print(f"Ошибка при парсинге admin_tg_ids: {e}")
-        admin_tg_ids = []
-    try:
-        # Приводим элементы списка к целочисленному типу, если они не числа
-        admin_ids = [int(x) for x in admin_tg_ids]
-    except Exception as e:
-        print(f"Ошибка при преобразовании admin_tg_ids в int: {e}")
-        admin_ids = []
+        ids = ast.literal_eval(raw_ids)
+        ids = [int(x) for x in ids]
+    except Exception:
+        ids = []
+    return tg_user_id in ids
 
-    return tg_user_id in admin_ids
-
-
-#---------------------------
-# Безопасное удаление последнего сообщения
-async def safely_delete_last_message(tg_user_id, chat_id):
+# -------------------------------------------------
+# Safe delete last messages (unchanged)
+async def safely_delete_last_message(tg_user_id: int, chat_id: int):
     try:
         last_messages = await database.get_last_messages_by_user_id(tg_user_id)
-        if last_messages is not None:
-            for message in last_messages:
-                try:
-                    await bot.delete_message(chat_id=chat_id, message_id=message)
-                    # print(f"[Bot] Сообщение {message} пользователя {tg_user_id} успешно удалено")
-                except Exception as e:
-                    # print(f"[Bot] Ошибка при удалении сообщения для пользователя {tg_user_id}: {str(e)}")
-                    continue
-            await  database.clear_last_message_ids_by_user_id(tg_user_id)
-            # print(f"[DB] Все сообщения удалениы из базы данных {tg_user_id}")
-
-            await database.set_last_message_by_user_id(tg_user_id, None)
+        for msg_id in last_messages or []:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                continue
+        await database.clear_last_message_ids_by_user_id(tg_user_id)
     except Exception as e:
-        logger.error("Произошла ошибка в safely_delete_last_message: %s", e)
+        logger.error("Ошибка в safely_delete_last_message: %s", e)
 
-
-async def main_menu(tg_user_id: int):
+async def main_menu_client(tg_user_id: int):
     try:
+        inline_kb = InlineKeyboardMarkup(inline_keyboard=[
+            #[InlineKeyboardButton(text='Изменить номер', callback_data='change_phone')]
+        ])
         await bot.send_message(tg_user_id, "Добро пожаловать в главное меню!")
+        await bot.send_message(tg_user_id, "Выберите действие:", reply_markup=inline_kb)
     except Exception as e:
-        logger.error("Произошла ошибка в main_menu: %s", e)
+        logger.error("Ошибка в main_menu: %s", e)
 
+async def main_menu_admin(tg_user_id: int):
+    try:
+        inline_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='Изменить номер', callback_data='admin_change_phone')]
+        ])
+        await bot.send_message(tg_user_id, "Добро пожаловать в админ-панель!")
+        await bot.send_message(tg_user_id, "Выберите действие:", reply_markup=inline_kb)
+    except Exception as e:
+        logger.error("Ошибка в main_menu: %s", e)
 
-#----------------------------
-async def safe_polling(dp):
+# -------------------------------------------------
+# PostgreSQL LISTEN/NOTIFY listener for client_update channel
+async def start_listener():
+    conn = await asyncpg.connect(
+        database=db_name,
+        user=user,
+        password=password,
+        host=host,
+        port=port,
+    )
+
+    async def on_notify(_conn, pid, channel, payload):
+        logger.info(f"[notify] channel={channel}, payload={payload!r}")
+        try:
+            data = json.loads(payload)
+            tg = int(data.get('tg_user_id'))
+            # send notif_text if present
+            notif = data.get('notif_text')
+            print(notif, tg)
+            if notif:
+                await bot.send_message(chat_id=tg, text=notif)
+            # existing photo/text logic
+            '''photo = data.get('photo_path')
+            if photo:
+                await bot.send_photo(chat_id=tg, photo=photo)
+            desc = data.get('description')
+            if desc:
+                await bot.send_message(chat_id=tg, text=desc)'''
+        except Exception as e:
+            logger.error("Notify handler error: %s", e)
+    await conn.add_listener('client_update', on_notify)
+    logger.info("Listening on client_update...")
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        await conn.close()
+
+# -------------------------------------------------
+# Startup and polling
+async def on_startup():
+    await database.connect()
+    asyncio.create_task(start_listener())
+
+async def safe_polling(dp: Dispatcher):
     delay = 1
     while True:
         try:
-            # здесь используем глобальный bot
-            await dp.start_polling(bot, skip_updates=True)  # <<<
-            break  # если polling отработал без исключения, выходим из цикла
+            await dp.start_polling(bot, skip_updates=True)
+            break
         except Exception as e:
             logger.warning(f"Polling error: {e}. Reconnecting in {delay}s...")
             await asyncio.sleep(delay)
             delay = min(delay * 2, 60)
 
-
-
-@router.callback_query(lambda call: call.data == "main_menu")
-async def MMenu(callback: CallbackQuery):
-    try:
-        tg_user_id: int = int(callback.from_user.id)
-        await main_menu(tg_user_id)
-    except Exception as e:
-        logger.error("Произошла ошибка в MMenu: %s", e)
-
-
-async def on_startup():
-    try:
-        await database.connect()
-    except Exception as e:
-        logger.error("Произошла ошибка в on_startup: %s", e)
-
-
-# Запуск процесса
 async def main():
-    try:
-        dp.startup.register(on_startup)
-        # await dp.start_polling(bot, skip_updates=True)
-        await safe_polling(dp)
-    except Exception as e:
-        logger.error("Произошла ошибка в main: %s", e)
+    dp.startup.register(on_startup)
+    await safe_polling(dp)
 
-
-if __name__ == '__main__':  # выполняется, если код вызван непосредственно
+if __name__ == '__main__':
     try:
         asyncio.run(main())
         print("[Bot Running] Бот включён")
     except Exception as e:
-        logger.error("Произошла ошибка в __name__: %s", e)
+        logger.error("Ошибка в __main__: %s", e)
