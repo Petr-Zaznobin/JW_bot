@@ -5,6 +5,7 @@ import ast
 import os
 import json
 
+from aiogram.types import FSInputFile
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -274,21 +275,36 @@ async def start_listener():
         logger.info(f"[notify] channel={channel}, payload={payload!r}")
         try:
             data = json.loads(payload)
-            tg = int(data.get('tg_user_id'))
-            # send notif_text if present
-            notif = data.get('notif_text')
-            print(notif, tg)
-            if notif:
-                await bot.send_message(chat_id=tg, text=notif)
-            # existing photo/text logic
-            '''photo = data.get('photo_path')
-            if photo:
+            old = data.get('old', {})
+            new = data.get('new', {})
+            tg = int(new.get('tg_user_id') or old.get('tg_user_id'))
+
+            # 1) Текст уведомления
+            new_text = new.get('notif_text')
+            if new_text and new_text != old.get('notif_text'):
+                await bot.send_message(chat_id=tg, text=new_text)
+
+            # 2) Фото изделия
+            new_prod = new.get('product_photo_path')
+            if new_prod and new_prod != old.get('product_photo_path'):
+                if os.path.exists(new_prod):
+                    photo = FSInputFile(new_prod)
+                else:
+                    photo = new_prod
                 await bot.send_photo(chat_id=tg, photo=photo)
-            desc = data.get('description')
-            if desc:
-                await bot.send_message(chat_id=tg, text=desc)'''
+
+            # 3) Фото квитанции
+            new_rec = new.get('receipt_photo_path')
+            if new_rec and new_rec != old.get('receipt_photo_path'):
+                if os.path.exists(new_rec):
+                    photo = FSInputFile(new_rec)
+                else:
+                    photo = new_rec
+                await bot.send_photo(chat_id=tg, photo=photo)
+
         except Exception as e:
             logger.error("Notify handler error: %s", e)
+
     await conn.add_listener('client_update', on_notify)
     logger.info("Listening on client_update...")
     try:
@@ -296,6 +312,7 @@ async def start_listener():
             await asyncio.sleep(3600)
     finally:
         await conn.close()
+
 
 # -------------------------------------------------
 # Startup and polling

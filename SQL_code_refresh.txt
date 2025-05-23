@@ -61,4 +61,26 @@ ALTER TABLE client_info
 
 ALTER TABLE client_info
   ADD COLUMN product_photo_path TEXT DEFAULT '',
-  ADD COLUMN receipt_photo_path TEXT DEFAULT ''; 
+  ADD COLUMN receipt_photo_path TEXT DEFAULT '';
+
+---------------------------------------
+-- Функция для уведомления о обновлениях client_info
+CREATE OR REPLACE FUNCTION notify_client_update() RETURNS TRIGGER AS $$
+DECLARE
+  payload TEXT;
+BEGIN
+  payload := json_build_object(
+    'old', row_to_json(OLD),
+    'new', row_to_json(NEW)
+  )::text;
+  PERFORM pg_notify('client_update', payload);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS client_info_after_update ON client_info;
+CREATE TRIGGER client_info_after_update
+  AFTER UPDATE ON client_info
+  FOR EACH ROW
+  WHEN (OLD IS DISTINCT FROM NEW)
+  EXECUTE FUNCTION notify_client_update();
